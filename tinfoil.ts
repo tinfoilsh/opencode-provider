@@ -65,11 +65,17 @@ const CATALOG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
  * function" on the first one that is not callable — which silently unloads the
  * whole plugin, guard included. tui.ts keeps its own copy of this contract.
  */
-const STATUS_VERSION = 1
+const STATUS_VERSION = 2
 
 type TinfoilStatus = {
   v: number
   verified: boolean
+  /**
+   * Whether the guarded fetch is actually installed. Verification says the
+   * enclave is trustworthy; this says opencode is going through us to reach
+   * it. Both have to be true before the sidebar may claim anything.
+   */
+  guarded: boolean
   reason?: string
   releaseTag?: string
   releaseDigest?: string
@@ -115,6 +121,16 @@ type VerifyState = { kind: "pending" } | { kind: "verified" } | { kind: "failed"
 
 export const TinfoilProvider: Plugin = async ({ client }) => {
   let state: VerifyState = { kind: "pending" }
+
+  /**
+   * Set once opencode has actually taken `guardedFetch`.
+   *
+   * Verifying the enclave proves nothing about the transport if opencode is
+   * still using its own `fetch`, so this gates every claim the plugin makes.
+   * It is not a formality: the `auth.loader` route silently does not happen
+   * unless the provider has a stored auth entry.
+   */
+  let guarded = false
   let attempt: Promise<VerifyState> | undefined
   let lastAttemptAt = 0
 
@@ -439,6 +455,12 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
 
   /** One-line verdict, as the sidebar headline and the failure toast show it. */
   const summary = (verdict: VerifyState): string => {
+    if (!guarded) {
+      return (
+        `Tinfoil unprotected [!] — opencode is not routing this provider through Tinfoil, ` +
+        `so requests are NOT verified or encrypted to an enclave. See ${HELP_URL}`
+      )
+    }
     if (verdict.kind !== "verified") {
       const reason = verdict.kind === "failed" ? verdict.reason : "verification did not complete"
       return `Tinfoil unverified [!] — ${reason}. Requests are blocked. See ${HELP_URL}`
@@ -466,6 +488,19 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
   /** The full document, as `/tinfoil` renders it. */
   const report = (verdict: VerifyState): string => {
     const doc = document()
+    if (!guarded) {
+      return [
+        summary(verdict),
+        "",
+        "What this means",
+        "  opencode is sending this provider's requests with its own HTTP client",
+        "  rather than Tinfoil's, so nothing in this session is attested or",
+        "  encrypted to an enclave, whatever the enclave itself reports.",
+        "",
+        "  This should not happen. Please report it, with your opencode version,",
+        "  at https://github.com/tinfoilsh/opencode-provider/issues",
+      ].join("\n")
+    }
     if (verdict.kind !== "verified" || !doc) {
       return [
         summary(verdict),
@@ -520,20 +555,21 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
     const verdict = state
     if (verdict.kind === "pending") return
     const doc = document()
-    const status: TinfoilStatus = {
-      v: STATUS_VERSION,
-      verified: verdict.kind === "verified",
-      ...(verdict.kind === "failed" ? { reason: verdict.reason } : {}),
-      ...(doc?.releaseTag ? { releaseTag: doc.releaseTag } : {}),
-      ...(doc?.releaseDigest ? { releaseDigest: doc.releaseDigest } : {}),
-      ...(doc?.enclaveHost ? { enclaveHost: doc.enclaveHost } : {}),
-      report: report(verdict).split("\n"),
-      at: Date.now(),
-      pid: process.pid,
-    }
     try {
+      const status: TinfoilStatus = {
+        v: STATUS_VERSION,
+        verified: verdict.kind === "verified",
+        guarded,
+        ...(verdict.kind === "failed" ? { reason: verdict.reason } : {}),
+        ...(doc?.releaseTag ? { releaseTag: doc.releaseTag } : {}),
+        ...(doc?.releaseDigest ? { releaseDigest: doc.releaseDigest } : {}),
+        ...(doc?.enclaveHost ? { enclaveHost: doc.enclaveHost } : {}),
+        report: report(verdict).split("\n"),
+        at: Date.now(),
+        pid: process.pid,
+      }
       await writeAtomic(STATUS_PATH, JSON.stringify(status))
-      debug(`published status verified=${status.verified}`)
+      debug(`published status verified=${status.verified} guarded=${status.guarded}`)
     } catch (error) {
       debug(`could not publish status: ${errorMessage(error)}`)
     }
@@ -561,10 +597,11 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
   }
 
   /**
-   * Only failures toast now. The sidebar panel is a standing, always-visible
-   * signal for the good case, so a success toast on every session would be
-   * noise that trains people to dismiss the one message that matters. A
-   * failure still deserves interrupting: requests are blocked from here on.
+   * Only failures toast. The sidebar panel is a standing, always-visible signal
+   * for the good case, so a success toast on every session would be noise that
+   * trains people to dismiss the one message that matters. A failure deserves
+   * interrupting either way: requests are blocked from here on, or — worse —
+   * they are not going through the guard at all.
    */
   let announced = false
 
@@ -572,11 +609,33 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
     if (announced) return
     announced = true
     const verdict = await verify()
-    if (verdict.kind === "verified") return
+    if (verdict.kind === "verified" && guarded) return
     await toast(summary(verdict), "error")
   }
 
   return {
+    /**
+     * Where the guarded fetch is actually installed.
+     *
+     * `auth.loader` is the documented place for provider options, but opencode
+     * only calls it when the provider has a stored auth entry — so a user who
+     * supplies `TINFOIL_API_KEY` and never runs `opencode auth login` would get
+     * opencode's own `fetch`, the models.dev base URL, and no attestation, no
+     * body sealing and no guard, while this plugin cheerfully reported a
+     * verified enclave. The config hook runs either way.
+     *
+     * The loader still sets it too, for whichever of the two opencode consults
+     * first; both install the same function, so the duplication is harmless.
+     */
+    async config(config) {
+      const providers = ((config as Record<string, any>)["provider"] ??= {})
+      const entry = (providers[PROVIDER_ID] ??= {})
+      const options = (entry.options ??= {})
+      options.fetch = guardedFetch
+      guarded = true
+      debug("installed the request guard")
+    },
+
     async dispose() {
       clearInterval(heartbeat)
     },
@@ -594,9 +653,17 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
       provider: PROVIDER_ID,
       methods: [{ type: "api", label: "Tinfoil API key" }],
       async loader(auth) {
-        const stored: any = await auth()
+        // `auth()` is opencode's; a throw here would reach `Effect.promise` as
+        // a defect and take down startup rather than one provider.
+        let stored: any
+        try {
+          stored = await auth()
+        } catch (error) {
+          debug(`could not read stored auth: ${errorMessage(error)}`)
+        }
+        guarded = true
         return {
-          apiKey: stored?.key,
+          ...(stored?.key ? { apiKey: stored.key } : {}),
           fetch: guardedFetch,
         }
       },
