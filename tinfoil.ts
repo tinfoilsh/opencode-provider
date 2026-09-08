@@ -423,9 +423,14 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
    * document. Mode 0600: the contents are public information — a release
    * digest and public keys — but nothing else has any business writing what
    * the sidebar reads.
+   *
+   * 0700 on the directory to match what the SDK creates it with. Whoever gets
+   * there first decides: recursive `mkdir` leaves an existing directory's mode
+   * alone, so on a machine where this plugin runs before the SDK has written
+   * anything, a default 0755 would be what `~/.tinfoil` keeps.
    */
   const writeAtomic = async (path: string, contents: string): Promise<void> => {
-    await mkdir(dirname(path), { recursive: true })
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 })
     const temporary = `${path}.${process.pid}.tmp`
     await writeFile(temporary, contents, { encoding: "utf8", mode: 0o600 })
     await rename(temporary, path)
