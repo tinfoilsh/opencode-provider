@@ -1,0 +1,76 @@
+{
+	"name": "@tinfoilsh/opencode-provider",
+	"version": "0.1.0",
+	"description": "Verifiably-private models from Tinfoil secure enclaves, for the opencode coding agent",
+	"type": "module",
+	"license": "Apache-2.0",
+	"main": "./tinfoil.ts",
+	"exports": {
+		".": "./tinfoil.ts",
+		"./tui": "./tui.ts"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/tinfoilsh/opencode-provider.git"
+	},
+	"homepage": "https://tinfoil.sh/coding-agents",
+	"bugs": {
+		"url": "https://github.com/tinfoilsh/opencode-provider/issues"
+	},
+	"keywords": [
+		"opencode",
+		"opencode-plugin",
+		"tinfoil",
+		"provider",
+		"privacy",
+		"confidential-computing",
+		"attestation"
+	],
+	"peerDependencies": {
+		"@opencode-ai/plugin": "*",
+		"@opentui/core": ">=0.5.0",
+		"@opentui/solid": ">=0.5.0",
+		"solid-js": "^1.9.0"
+	},
+	"files": [
+		"tinfoil.ts",
+		"tui.ts",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"build": "echo 'nothing to build'",
+		"check": "tsc --noEmit"
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"dependencies": {
+		"tinfoil": "^1.2.1"
+	},
+	"devDependencies": {
+		"@opencode-ai/plugin": "^1.18.27",
+		"@types/node": "^24.0.0",
+		"typescript": "^5.9.0",
+		"@opentui/core": "^0.5.11",
+		"@opentui/solid": "^0.5.11",
+		"solid-js": "^1.9.0"
+	},
+	"peerDependenciesMeta": {
+		"@opentui/core": {
+			"optional": true
+		},
+		"@opentui/solid": {
+			"optional": true
+		},
+		"solid-js": {
+			"optional": true
+		},
+		"@opencode-ai/plugin": {
+			"optional": true
+		}
+	},
+	"engines": {
+		"opencode": ">=1.18"
+	}
+}
