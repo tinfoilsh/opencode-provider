@@ -269,14 +269,56 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
     pricing?: { inputTokenPricePer1M?: number; outputTokenPricePer1M?: number }
   }
 
+  /**
+   * Everything below treats the model list as untrusted input.
+   *
+   * It arrives from the enclave over the verified channel and is then cached on
+   * disk for a week, so a single bad response is not a transient problem — it
+   * is a file that keeps being read back. And the consumer is unforgiving:
+   * opencode calls `provider.models` through `Effect.promise`, where a rejected
+   * promise is a defect rather than a handled error, so one bad entry that
+   * throws takes down every provider in the session, not just this one.
+   */
+
+  /**
+   * A model id has to be safe both as an object key and as a lookup into an
+   * object literal. `__proto__` would set a prototype instead of adding an
+   * entry; `constructor`, `toString` and friends are only dangerous on the
+   * lookup side, which uses `Object.hasOwn`, but there is no reason to accept
+   * them. Control characters would reach the terminal.
+   */
+  const isSafeId = (id: unknown): id is string =>
+    typeof id === "string" &&
+    id.length > 0 &&
+    id.length <= 256 &&
+    id !== "__proto__" &&
+    // eslint-disable-next-line no-control-regex
+    !/[\u0000-\u001f\u007f]/.test(id)
+
   /** A coding agent needs chat plus tool calling; anything else fails in the picker. */
-  const isUsable = (raw: TinfoilApiModel): boolean => {
-    if (!raw.id) return false
-    if (raw.type && raw.type !== "chat") return false
-    if (raw.endpoints && !raw.endpoints.includes("/v1/chat/completions")) return false
-    if (raw.tool_calling === false) return false
+  const isUsable = (raw: unknown): raw is TinfoilApiModel => {
+    if (!raw || typeof raw !== "object") return false
+    const model = raw as TinfoilApiModel
+    if (!isSafeId(model.id)) return false
+    if (model.type && model.type !== "chat") return false
+    if (Array.isArray(model.endpoints) && !model.endpoints.includes("/v1/chat/completions")) return false
+    if (model.tool_calling === false) return false
     return true
   }
+
+  /**
+   * Numbers from the enclave land in opencode's context accounting and cost
+   * display, where a string or a NaN is not caught but quietly propagates.
+   */
+  const CONTEXT_CEILING = 10_000_000
+
+  const positiveInt = (value: unknown, fallback: number): number => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return fallback
+    return Math.min(Math.floor(value), CONTEXT_CEILING)
+  }
+
+  const price = (value: unknown, fallback: number): number =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback
 
   /** /v1/models reports no output-token limit; derive a conservative one. */
   const deriveMaxTokens = (contextWindow: number): number =>
@@ -306,9 +348,18 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
     for (const raw of live) {
       if (!isUsable(raw)) continue
       const id = raw.id as string
-      const contextWindow = raw.context_window ?? template.limit?.context ?? 128000
-      const known = existing[id]
-      const model = structuredClone(known ?? template)
+      const contextWindow = positiveInt(raw.context_window, positiveInt(template.limit?.context, 128000))
+      // `Object.hasOwn`, not `existing[id]`: a bare lookup finds inherited
+      // members, so an id of `constructor` or `toString` would clone a function
+      // and `structuredClone` would throw.
+      const known = Object.hasOwn(existing, id) ? existing[id] : undefined
+      let model: any
+      try {
+        model = structuredClone(known ?? template)
+      } catch (error) {
+        debug(`skipping model ${id}: ${errorMessage(error)}`)
+        continue
+      }
 
       // A cloned template carries the donor model's identity-ish fields. Left
       // in place they would advertise variants and a release date belonging to
@@ -328,7 +379,7 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
       model.limit = {
         ...model.limit,
         context: contextWindow,
-        output: raw.max_tokens ?? deriveMaxTokens(contextWindow),
+        output: positiveInt(raw.max_tokens, deriveMaxTokens(contextWindow)),
       }
       model.capabilities = {
         ...model.capabilities,
@@ -337,11 +388,11 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
         attachment: raw.multimodal === true,
         input: { ...model.capabilities?.input, text: true, image: raw.multimodal === true },
       }
-      if (raw.pricing) {
+      if (raw.pricing && typeof raw.pricing === "object") {
         model.cost = {
           ...model.cost,
-          input: raw.pricing.inputTokenPricePer1M ?? model.cost?.input ?? 0,
-          output: raw.pricing.outputTokenPricePer1M ?? model.cost?.output ?? 0,
+          input: price(raw.pricing.inputTokenPricePer1M, price(model.cost?.input, 0)),
+          output: price(raw.pricing.outputTokenPricePer1M, price(model.cost?.output, 0)),
         }
       }
       models[id] = model
@@ -364,7 +415,9 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
       }
       if (raw.v !== CATALOG_VERSION || !Array.isArray(raw.models)) return undefined
       if (Date.now() - (raw.at ?? 0) > CATALOG_MAX_AGE_MS) return undefined
-      return raw.models
+      // Written by a previous run, but read as untrusted all the same: the file
+      // outlives the response that produced it, and it is a plain file on disk.
+      return raw.models.filter(isUsable)
     } catch {
       return undefined
     }
@@ -387,8 +440,12 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
         signal: AbortSignal.timeout(DISCOVER_TIMEOUT_MS),
       })
       if (!response.ok) throw new Error(`HTTP ${response.status} from /v1/models`)
-      const live = ((await response.json()) as { data?: TinfoilApiModel[] }).data ?? []
-      if (!live.length) return
+      const payload = (await response.json()) as { data?: unknown }
+      const live = Array.isArray(payload.data) ? payload.data.filter(isUsable) : []
+      if (!live.length) {
+        debug("enclave served no usable chat models; keeping the cached list")
+        return
+      }
       await writeAtomic(CATALOG_PATH, JSON.stringify({ v: CATALOG_VERSION, at: Date.now(), models: live }))
       debug(`cached ${live.length} models from the enclave`)
     } catch (error) {
@@ -405,17 +462,24 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
    */
   const discover = async (provider: any): Promise<Record<string, any>> => {
     const existing: Record<string, any> = provider.models ?? {}
-    void refreshCache()
+    try {
+      void refreshCache()
 
-    const cached = await readCache()
-    if (!cached) {
-      debug("no cached model list, keeping the models.dev catalog")
+      const cached = await readCache()
+      if (!cached) {
+        debug("no cached model list, keeping the models.dev catalog")
+        return existing
+      }
+      const models = buildCatalog(existing, cached)
+      if (!models) return existing
+      debug(`serving ${Object.keys(models).length} models from the cached enclave list`)
+      return models
+    } catch (error) {
+      // A rejection from this hook is an opencode-wide defect, not a provider
+      // that lost its model list. Nothing here is worth that.
+      debug(`catalog build failed (${errorMessage(error)}), keeping the models.dev catalog`)
       return existing
     }
-    const models = buildCatalog(existing, cached)
-    if (!models) return existing
-    debug(`serving ${Object.keys(models).length} models from the cached enclave list`)
-    return models
   }
 
   /**
