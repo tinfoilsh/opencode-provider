@@ -17,7 +17,7 @@ merely verifies the transport of the one that is already there.
    ```
 
    Use `opencode plugin`, not a hand-edited config. This package has two
-   halves — the provider itself and the sidebar panel — a:and they are registered
+   halves — the provider itself and the sidebar panel — and they are registered
    in two different files: `plugin` in `opencode.json` for the server half and
    `plugin` in `tui.json` for the TUI half. The command detects both
    ("Detected server + tui targets") and writes both. Adding the package to
@@ -52,6 +52,12 @@ This is not a full external verifier — there is no independent AMD
 signature-chain check. For that, use
 [tinfoil-cli](https://github.com/tinfoilsh/tinfoil-cli).
 
+The guard is installed through opencode's `config` hook, so it is in place
+whether the key comes from `opencode auth login` or from `TINFOIL_API_KEY`.
+(`auth.loader`, the documented home for provider options, is only called when
+the provider has a stored auth entry — on its own it would leave an env-var-only
+setup running unguarded.)
+
 The plugin **fails closed**. If verification does not succeed, requests are
 refused before anything leaves your machine — not the API key, system prompt,
 tool definitions, or your code:
@@ -84,8 +90,15 @@ The plugin adds a **Tinfoil section to the sidebar**, above Context and LSP:
 Green when the enclave is verified, red `Tinfoil ! UNVERIFIED — requests
 blocked` when it is not, and muted `Tinfoil · checking…` while the first
 attestation is still in flight. It is a standing signal, so there is no success
-toast to dismiss; a verification *failure* does toast, once, because from that
-point on requests are refused.
+toast to dismiss; a *failure* does toast, once, because from that point on
+requests are refused.
+
+There is a third, louder state: red `Tinfoil ! NOT PROTECTED — not routed
+through Tinfoil`. It means opencode is sending this provider's requests with
+its own HTTP client rather than ours, so nothing is attested or encrypted to an
+enclave no matter what the enclave itself reports. The panel never claims
+`encrypted` on the strength of a verified enclave alone — it has to see the
+guard installed as well. If you hit this state, please report it.
 
 For the full document, type **`/tinfoil`**, or open the command palette
 (`ctrl+p`) and pick **Tinfoil: verification details** — release tag and digest,

@@ -21,11 +21,12 @@ import { basename, dirname, join } from "node:path"
 
 /** Must match STATUS_PATH / TinfoilStatus in tinfoil.ts. */
 const STATUS_PATH = join(homedir(), ".tinfoil", "opencode-status.json")
-const STATUS_VERSION = 1
+const STATUS_VERSION = 2
 
 type TinfoilStatus = {
   v: number
   verified: boolean
+  guarded: boolean
   reason?: string
   releaseTag?: string
   releaseDigest?: string
@@ -55,6 +56,13 @@ type View =
   | { kind: "unknown" }
   | { kind: "verified"; status: TinfoilStatus }
   | { kind: "unverified"; status: TinfoilStatus }
+  /**
+   * The enclave may be perfectly verified and yet opencode is not routing this
+   * provider through us, in which case none of it applies to the session. A
+   * separate state, because "unverified — requests blocked" would be a
+   * comforting lie: nothing is blocked, it is simply unprotected.
+   */
+  | { kind: "unprotected"; status: TinfoilStatus }
 
 /**
  * Is the process that published this verdict still running?
@@ -82,8 +90,10 @@ const read = async (): Promise<View> => {
   try {
     const raw = JSON.parse(await readFile(STATUS_PATH, "utf8")) as TinfoilStatus
     if (raw?.v !== STATUS_VERSION || typeof raw.verified !== "boolean") return { kind: "unknown" }
+    if (typeof raw.guarded !== "boolean") return { kind: "unknown" }
     if (Date.now() - (raw.at ?? 0) > STALE_MS) return { kind: "unknown" }
     if (!isRunning(raw.pid)) return { kind: "unknown" }
+    if (!raw.guarded) return { kind: "unprotected", status: raw }
     return raw.verified ? { kind: "verified", status: raw } : { kind: "unverified", status: raw }
   } catch {
     // No file yet (server still attesting), or unreadable. Either way we do not
@@ -293,15 +303,19 @@ const plugin: TuiPluginModule = {
               ? `Tinfoil ${MARK_OK} encrypted`
               : current.kind === "unverified"
                 ? `Tinfoil ${MARK_BAD} UNVERIFIED`
-                : "Tinfoil · checking…"
+                : current.kind === "unprotected"
+                  ? `Tinfoil ${MARK_BAD} NOT PROTECTED`
+                  : "Tinfoil · checking…"
           const detail =
             current.kind === "verified"
               ? `  ${current.status.releaseTag ?? "unknown"} · ${shortHash(current.status.releaseDigest)}`
               : current.kind === "unverified"
                 ? "  requests blocked"
-                : "  waiting for attestation"
+                : current.kind === "unprotected"
+                  ? "  not routed through Tinfoil"
+                  : "  waiting for attestation"
           const fg =
-            current.kind === "verified" ? theme.success : current.kind === "unverified" ? theme.error : theme.textMuted
+            current.kind === "verified" ? theme.success : current.kind === "unknown" ? theme.textMuted : theme.error
 
           return [jsx("text", { fg, children: headline }), jsx("text", { fg: theme.textMuted, children: detail })]
         },
