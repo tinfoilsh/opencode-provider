@@ -40,7 +40,8 @@
 	],
 	"scripts": {
 		"build": "echo 'nothing to build'",
-		"check": "tsc --noEmit"
+		"check": "tsc --noEmit",
+		"prepublishOnly": "npm run check"
 	},
 	"publishConfig": {
 		"access": "public"
