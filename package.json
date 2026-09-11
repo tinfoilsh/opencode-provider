@@ -1,6 +1,6 @@
 {
 	"name": "@tinfoilsh/opencode-provider",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Verifiably-private models from Tinfoil secure enclaves, for the opencode coding agent",
 	"type": "module",
 	"license": "Apache-2.0",
