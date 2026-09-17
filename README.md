@@ -15,9 +15,6 @@ secure enclaves that even Tinfoil cannot read into.
    opencode plugin @tinfoilsh/opencode-provider --global
    ```
 
-   Use this command rather than editing your config by hand. The plugin has two
-   halves, the provider and the sidebar panel, and the command registers both.
-
 2. Set your API key:
 
    ```bash
@@ -32,10 +29,6 @@ secure enclaves that even Tinfoil cannot read into.
    ```bash
    opencode run --model tinfoil/gpt-oss-120b "explain this repo"
    ```
-
-opencode already knows the `tinfoil` provider through
-[models.dev](https://models.dev), so there is no base URL, API key or model list
-to add to `opencode.json`, and no local proxy to run.
 
 ## How verification works
 
@@ -56,10 +49,6 @@ Error: Tinfoil: refusing to send this request. Enclave verification failed: <rea
 
 Verification is retried on the next request, at most once every 30 seconds.
 
-This is not a full external verifier: there is no independent AMD
-signature-chain check. For that, use
-[tinfoil-cli](https://github.com/tinfoilsh/tinfoil-cli).
-
 ## Seeing the verification state
 
 The sidebar shows a Tinfoil section, above Context and LSP:
@@ -79,11 +68,9 @@ The sidebar shows a Tinfoil section, above Context and LSP:
 No Tinfoil section at all means the plugin is not loaded, and you are not
 verified. Start opencode with `TINFOIL_DEBUG=1` to see why.
 
-For the full verification document — release tag and digest, code and enclave
-fingerprints, attested keys, and every verification step — type **`/tinfoil`**,
+For the full verification document run **`/tinfoil`**,
 or open the command palette (`ctrl+p`) and pick **Tinfoil: verification
-details**. It opens in the terminal only: nothing is added to the conversation
-and no context is re-sent.
+details**.
 
 ## Settings
 
