@@ -41,13 +41,7 @@ the verified enclave can read it.
 
 The plugin fails closed. If verification does not succeed, requests are refused
 before anything leaves your machine, including your API key, your prompts and
-your code:
-
-```
-Error: Tinfoil: refusing to send this request. Enclave verification failed: <reason>
-```
-
-Verification is retried on the next request, at most once every 30 seconds.
+your code.
 
 ## Seeing the verification state
 
@@ -57,16 +51,6 @@ The sidebar shows a Tinfoil section, above Context and LSP:
     Tinfoil ✓ encrypted
       v0.0.145 · 43fe4ff77e94
 ```
-
-| Sidebar | What it means |
-| --- | --- |
-| `Tinfoil ✓ encrypted` | Verified. Requests are sealed to this enclave. |
-| `Tinfoil ! UNVERIFIED` | Verification failed. Requests are blocked. |
-| `Tinfoil ! NOT PROTECTED` | opencode is not sending through the plugin, so nothing is verified or encrypted. Please [report it](https://github.com/tinfoilsh/opencode-provider/issues). |
-| `Tinfoil · checking…` | The first attestation is still running. |
-
-No Tinfoil section at all means the plugin is not loaded, and you are not
-verified. Start opencode with `TINFOIL_DEBUG=1` to see why.
 
 For the full verification document run **`/tinfoil`**,
 or open the command palette (`ctrl+p`) and pick **Tinfoil: verification
@@ -78,13 +62,3 @@ details**.
 | --- | --- | --- |
 | `TINFOIL_API_KEY` | _(none)_ | Your `tk_…` key, for headless workflows. Not needed if you use `opencode auth login`, the preferred login for everyday operation. |
 | `TINFOIL_DEBUG` | _(unset)_ | Log verification and model discovery to stderr. |
-
-## Contributing
-
-Bug reports and patches are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for
-how to run the plugin from a checkout, and for the opencode plugin behaviour
-worth knowing before you change anything.
-
-## License
-
-[Apache-2.0](LICENSE)
