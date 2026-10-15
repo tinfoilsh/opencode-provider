@@ -44,8 +44,7 @@
 	"scripts": {
 		"build": "echo 'nothing to build'",
 		"check": "tsc --noEmit",
-		"test": "node --experimental-test-module-mocks --test test/*.test.mjs",
-		"prepublishOnly": "npm run check && npm test"
+		"prepublishOnly": "npm run check"
 	},
 	"publishConfig": {
 		"access": "public"

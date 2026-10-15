@@ -4,6 +4,7 @@
 // OpenCode 1.x registers this half separately in tui.json.
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import type { Context, Definition } from "@opencode/plugin/tui/plugin"
+import type { TinfoilStatus } from "./tinfoil.ts"
 import { watch, type FSWatcher } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -20,22 +21,9 @@ import { basename, dirname, join } from "node:path"
  * no sidebar at all.
  */
 
-/** Must match STATUS_PATH / TinfoilStatus in tinfoil.ts. */
+/** Must match STATUS_PATH / STATUS_VERSION in tinfoil.ts. */
 const STATUS_PATH = join(homedir(), ".tinfoil", "opencode-status.json")
 const STATUS_VERSION = 2
-
-type TinfoilStatus = {
-  v: number
-  verified: boolean
-  guarded: boolean
-  reason?: string
-  releaseTag?: string
-  releaseDigest?: string
-  enclaveHost?: string
-  report: string[]
-  at: number
-  pid: number
-}
 
 /**
  * A backstop only. The file is watched, so this exists for the filesystems

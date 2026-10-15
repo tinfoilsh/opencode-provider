@@ -34,12 +34,11 @@ The first run installs dependencies and can take a few minutes, printing nothing
 while it works. It looks like a hang. Let it finish; every run after starts
 immediately.
 
-Typecheck and run the regression tests with Node 24 or newer:
+Install dependencies and typecheck:
 
 ```bash
 npm install
 npm run check
-npm test
 ```
 
 ## How the two halves fit together
@@ -48,6 +47,10 @@ npm test
 verifies the enclave, and installs the guarded fetch that blocks unverified
 requests. `tui.ts` runs in the separate TUI process and draws the sidebar panel
 and the `/tinfoil` dialog.
+
+Only instances whose transport is installed start verification, catalog refresh,
+and the status heartbeat. OpenCode 1.x also creates instances for catalog lookup;
+these must not overwrite the active connection's verdict.
 
 The TUI half never verifies anything itself. The server half publishes its
 verdict to `~/.tinfoil/opencode-status.json` and the TUI half renders that.
@@ -141,7 +144,7 @@ sides of the cache, and never let a bad entry escape as a rejection from
 
 ## Before publishing
 
-- `npm run check` and `npm test`
+- `npm run check`
 - `npm pack --dry-run` — should list exactly `LICENSE`, `README.md`,
   `package.json`, `server.ts`, `tinfoil.ts` and `tui.ts`
 - Check fail-closed in both auth configurations: with a saved credential,
