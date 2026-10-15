@@ -1,26 +1,43 @@
 # Contributing
 
+For normal installation, follow the [npm setup instructions](README.md#setup).
+The checkout workflow below is for developing the plugin.
+
 ## Running from a checkout
 
-The `plugin` arrays accept a local directory, so an unpublished checkout
-installs the same way a published one does:
+On OpenCode 2, add the checkout directory to `plugins` in
+`~/.config/opencode/opencode.json` (or your project's `opencode.json`):
+
+```json
+{
+  "plugins": ["/path/to/opencode-provider"]
+}
+```
+
+Local directories resolve `server.ts` and `tui.ts`. Published packages expose
+these through `./server` and `./tui`. The server entry point re-exports the
+implementation in `tinfoil.ts`.
+
+For OpenCode 1.x, use:
 
 ```bash
 opencode plugin /path/to/opencode-provider --global --force
 ```
 
-That resolves `.` to `tinfoil.ts` for the server half and `./tui` to `tui.ts`
-for the TUI half, and writes both config files. Then:
+Run an isolated OpenCode 2 server while developing, so an existing background
+service does not retain an older plugin:
 
 ```bash
-TINFOIL_DEBUG=1 opencode run --model tinfoil/gpt-oss-120b "reply with exactly: PONG"
+TINFOIL_DEBUG=1 opencode run --standalone --model tinfoil/gpt-oss-120b "reply with exactly: PONG"
 ```
+
+Omit `--standalone` on OpenCode 1.x.
 
 The first run installs dependencies and can take a few minutes, printing nothing
 while it works. It looks like a hang. Let it finish; every run after starts
 immediately.
 
-Typecheck with:
+Install dependencies and typecheck:
 
 ```bash
 npm install
@@ -34,17 +51,22 @@ verifies the enclave, and installs the guarded fetch that blocks unverified
 requests. `tui.ts` runs in the separate TUI process and draws the sidebar panel
 and the `/tinfoil` dialog.
 
+Only instances whose transport is installed start verification, catalog refresh,
+and the status heartbeat. OpenCode 1.x also creates instances for catalog lookup;
+these must not overwrite the active connection's verdict.
+
 The TUI half never verifies anything itself. The server half publishes its
 verdict to `~/.tinfoil/opencode-status.json` and the TUI half renders that.
 Verifying separately in the TUI would be a second opinion that could disagree
 with the one being enforced, and a sidebar claiming "verified" while the guard
 fails closed is worse than no sidebar.
 
-A file is used because opencode has no channel between a plugin's two halves.
+A file was used because OpenCode 1.x has no channel between a plugin's two halves.
 `client.tui.publish` takes three fixed event types and nothing custom; provider
 `options` and the `config` hook are resolved once at startup and cannot reflect
 a later re-verification; and a socket would still need its path published
 somewhere. The TUI watches the file, so updates arrive as soon as they land.
+OpenCode 2 reuses this existing contract and the same verifier.
 
 A verdict is only rendered while the process that published it is still running
 (`process.kill(pid, 0)`), which a time window cannot check: the server rewrites
@@ -67,20 +89,25 @@ no warning. Everything below is a variation on that theme, which is why the
 plugin turns every startup failure into a state the guard can see rather than
 one that unloads the guard.
 
-**Install the guarded fetch from the `config` hook, not only from
+**On OpenCode 1.x, install the guarded fetch from the `config` hook, not only from
 `auth.loader`.** opencode skips `auth.loader` entirely unless the provider has a
 stored auth entry, so a user with `TINFOIL_API_KEY` set and no `opencode auth
 login` would otherwise get opencode's own fetch, with no attestation and no body
 sealing. The status file carries a `guarded` flag for exactly this reason: a
 verified enclave says nothing if opencode is not going through us to reach it.
 
-**Do not add a non-function export to `tinfoil.ts`.** opencode's loader walks
-every export of a server plugin and throws `Plugin export is not a function` on
-the first one that is not callable, which unloads the whole plugin. This is why
-the status-file constants are module-private and duplicated in `tui.ts` rather
-than exported and shared.
+**Keep both entry points on the default definition.** OpenCode 2 requires
+`{ id, setup }`; OpenCode 1.x consumes `{ id, server }`. Both call the same
+verifier and guard. OpenCode 2 resolves saved and environment credentials itself;
+its provider transform selects `aisdk:@ai-sdk/openai-compatible`, and its scoped
+`sdk` hook constructs that driver with the guarded fetch. Changing only the
+export shape would load the plugin without protecting requests.
 
-**Nothing on a hook path may reject.** opencode invokes `auth.loader` and
+OpenCode 2's TUI also uses `setup`, with `ui.slot`, `keymap.layer`, and
+`ui.dialog.show`. The `tui` entry point retains the OpenCode 1.x API. Both render
+the existing status-file format; no credential or cache migration is needed.
+
+**OpenCode 1.x auth and discovery hooks must not reject.** opencode invokes `auth.loader` and
 `provider.models` through `Effect.promise`, where a rejected promise is a defect
 rather than a handled error. One rejection takes down every provider in the
 session, not just this one. Verification failure is a value here, never a throw.
@@ -105,7 +132,7 @@ keystroke. `replace` resets the dialog size to `medium`, so call `setSize` after
 it. The overlay applies its own `paddingTop: terminalHeight / 4`, so wrapping a
 child in `api.ui.Dialog` applies it twice and pushes the dialog off screen.
 
-**Command palette entries need the deprecated API.** `api.keymap.registerLayer`
+**OpenCode 1.x command palette entries need the deprecated API.** `api.keymap.registerLayer`
 is the documented replacement for `api.command.register`, but as of opencode
 1.18.27 a command registered that way is dispatchable and invisible: `ctrl+p`
 shows nothing. The legacy call is also the only one that accepts a `slash` name.
@@ -122,8 +149,11 @@ sides of the cache, and never let a bad entry escape as a rejection from
 
 - `npm run check`
 - `npm pack --dry-run` — should list exactly `LICENSE`, `README.md`,
-  `package.json`, `tinfoil.ts` and `tui.ts`
-- Check fail-closed in both auth configurations: with an entry in `auth.json`,
-  and with `TINFOIL_API_KEY` set and no entry. Break verification (for example
+  `package.json`, `server.ts`, `tinfoil.ts` and `tui.ts`
+- Validate the packaged release through OpenCode's package installer, including
+  automatic loading of the sidebar and `/tinfoil`; a checkout path bypasses
+  package resolution and dependency installation.
+- Check fail-closed in both auth configurations: with a saved credential,
+  and with `TINFOIL_API_KEY` set and no saved credential. Break verification (for example
   by constructing the client against a config repo that cannot resolve) and
   confirm the request is refused with a non-zero exit and no output.
