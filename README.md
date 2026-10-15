@@ -20,6 +20,13 @@ Supports OpenCode 1.19.1+ (1.x) and 2.0.30+.
    OpenCode downloads the package from npm and installs the provider and sidebar
    globally. This is the [standard OpenCode 2 installation flow](https://opencode.ai/v2/docs/plugins#manage).
 
+   To upgrade an existing OpenCode 2 installation:
+
+   ```bash
+   opencode plugin update @tinfoilsh/opencode-provider
+   opencode service restart
+   ```
+
    For OpenCode 1.x, use
    `opencode plugin @tinfoilsh/opencode-provider --global` instead.
 
