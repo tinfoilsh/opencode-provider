@@ -1,11 +1,13 @@
 // Types only; opencode injects the real runtime. Kept as a peer dependency so
 // the plugin tracks whatever opencode version the user already has.
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin, PluginModule } from "@opencode-ai/plugin"
+import type { Plugin as PluginV2 } from "@opencode/plugin/promise/plugin"
 // Types only. The runtime import happens inside the factory, off opencode's
 // startup path — see the `load` promise below. Resolves from this package's own
 // node_modules when installed as an npm plugin, or from the opencode config
 // directory when dropped in as a file.
 import type { SecureClient as SecureClientInstance, VerificationDocument } from "tinfoil"
+import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
@@ -28,6 +30,7 @@ import { dirname, join } from "node:path"
 
 const PROVIDER_ID = "tinfoil"
 const HELP_URL = "https://tinfoil.sh/coding-agents"
+const BLOCKED_REQUEST = "Tinfoil: refusing to send this request."
 
 /** Hosts whose requests may be retargeted at the attested enclave. */
 const TINFOIL_HOST = /(^|\.)tinfoil\.sh$/
@@ -35,11 +38,9 @@ const TINFOIL_HOST = /(^|\.)tinfoil\.sh$/
 /**
  * Where this half publishes its verdict for the TUI half to render.
  *
- * The two halves run in different processes (server vs TUI) and opencode has
- * no channel between them — `tui.publish` only accepts three built-in event
- * types. So the process that actually owns the SecureClient, and therefore
- * actually enforces, writes what it decided; the sidebar only ever renders
- * that. The panel can never claim verified while the guard is failing closed.
+ * The two halves run in different processes (server vs TUI). Keep the status
+ * contract used by the OpenCode 1.x integration: the process that owns the
+ * SecureClient writes what it decided, and the sidebar renders that verdict.
  *
  * Verification is a property of the enclave, not of a project, so a single
  * shared file is correct even with several opencode windows open.
@@ -60,10 +61,8 @@ const CATALOG_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
  * Bump when the shape changes; the reader ignores versions it knows nothing
  * about.
  *
- * Note these are deliberately NOT exported. opencode's plugin loader walks
- * every export of a server plugin module and throws "Plugin export is not a
- * function" on the first one that is not callable — which silently unloads the
- * whole plugin, guard included. tui.ts keeps its own copy of this contract.
+ * tui.ts keeps its own copy of this on-disk contract. Both OpenCode entry
+ * points below share the same verifier and status publisher.
  */
 const STATUS_VERSION = 2
 
@@ -119,7 +118,7 @@ const errorMessage = (error: unknown) => (error instanceof Error ? error.message
  */
 type VerifyState = { kind: "pending" } | { kind: "verified" } | { kind: "failed"; reason: string }
 
-export const TinfoilProvider: Plugin = async ({ client }) => {
+const createProvider = async (notify?: (message: string) => Promise<unknown>) => {
   let state: VerifyState = { kind: "pending" }
 
   /**
@@ -228,7 +227,7 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
     if (current.kind !== "verified") current = await revalidate()
     if (current.kind !== "verified") {
       throw new Error(
-        `Tinfoil: refusing to send this request. Enclave verification failed: ` +
+        `${BLOCKED_REQUEST} Enclave verification failed: ` +
           `${current.kind === "failed" ? current.reason : "verification did not complete"}. See ${HELP_URL}`,
       )
     }
@@ -351,7 +350,11 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
    * override only the fields the enclave actually reports. Models the enclave
    * no longer serves fall out; ones models.dev has not caught up with appear.
    */
-  const buildCatalog = (existing: Record<string, any>, live: TinfoilApiModel[]): Record<string, any> | undefined => {
+  const buildCatalog = (
+    existing: Record<string, any>,
+    live: TinfoilApiModel[],
+    version: 1 | 2 = 1,
+  ): Record<string, any> | undefined => {
     const template = Object.values(existing)[0]
     if (!template) {
       // No models.dev entry to clone, so there is no safe shape to build.
@@ -384,32 +387,45 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
         delete model.variants
         delete model.family
         model.status = "active"
-        model.release_date = ""
+        if (version === 1) model.release_date = ""
+        else {
+          model.time = { released: 0 }
+          model.variants = []
+        }
       }
 
       model.id = id
       model.name = raw.name ?? id
       // No `api.url`: `retarget` sends every request to the attested enclave,
       // whichever router that turns out to be.
-      model.api = { ...model.api, id }
+      if (version === 1) model.api = { ...model.api, id }
+      else model.modelID = id
       model.limit = {
         ...model.limit,
         context: contextWindow,
         output: positiveInt(raw.max_tokens, deriveMaxTokens(contextWindow)),
       }
-      model.capabilities = {
-        ...model.capabilities,
-        toolcall: true,
-        reasoning: raw.reasoning === true,
-        attachment: raw.multimodal === true,
-        input: { ...model.capabilities?.input, text: true, image: raw.multimodal === true },
-      }
+      model.capabilities = version === 2
+        ? {
+            tools: true,
+            input: raw.multimodal === true ? ["text", "image"] : ["text"],
+            output: ["text"],
+          }
+        : {
+            ...model.capabilities,
+            toolcall: true,
+            reasoning: raw.reasoning === true,
+            attachment: raw.multimodal === true,
+            input: { ...model.capabilities?.input, text: true, image: raw.multimodal === true },
+          }
       if (raw.pricing && typeof raw.pricing === "object") {
-        model.cost = {
-          ...model.cost,
-          input: price(raw.pricing.inputTokenPricePer1M, price(model.cost?.input, 0)),
-          output: price(raw.pricing.outputTokenPricePer1M, price(model.cost?.output, 0)),
+        const base = version === 2 ? model.cost?.[0] : model.cost
+        const cost = {
+          ...base,
+          input: price(raw.pricing.inputTokenPricePer1M, price(base?.input, 0)),
+          output: price(raw.pricing.outputTokenPricePer1M, price(base?.output, 0)),
         }
+        model.cost = version === 2 ? [cost] : cost
       }
       models[id] = model
     }
@@ -511,7 +527,8 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
    */
   const writeAtomic = async (path: string, contents: string): Promise<void> => {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-    const temporary = `${path}.${process.pid}.tmp`
+    // Verification and guard installation can publish concurrently.
+    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
     await writeFile(temporary, contents, { encoding: "utf8", mode: 0o600 })
     await rename(temporary, path)
   }
@@ -657,11 +674,8 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
    * so much as never answer. Racing it keeps a headless session from stalling
    * on a cosmetic notification.
    */
-  const toast = async (message: string, variant: "error") => {
-    const shown = client.tui
-      .showToast({ body: { title: "Tinfoil", message, variant } })
-      .then(() => {})
-      .catch(() => {})
+  const toast = async (message: string) => {
+    const shown = notify?.(message).catch(() => {})
     await Promise.race([shown, new Promise<void>((resolve) => setTimeout(resolve, 2000).unref?.())])
   }
 
@@ -679,77 +693,118 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
     announced = true
     const verdict = await verify()
     if (verdict.kind === "verified" && guarded) return
-    await toast(summary(verdict), "error")
+    await toast(summary(verdict))
   }
 
   return {
-    /**
-     * Where the guarded fetch is actually installed.
-     *
-     * `auth.loader` is the documented place for provider options, but opencode
-     * only calls it when the provider has a stored auth entry — so a user who
-     * supplies `TINFOIL_API_KEY` and never runs `opencode auth login` would get
-     * opencode's own `fetch`, the models.dev base URL, and no attestation, no
-     * body sealing and no guard, while this plugin cheerfully reported a
-     * verified enclave. The config hook runs either way.
-     *
-     * The loader still sets it too, for whichever of the two opencode consults
-     * first; both install the same function, so the duplication is harmless.
-     */
+    guardedFetch,
+    installGuard() {
+      guarded = true
+      void publishStatus()
+      debug("installed the request guard")
+    },
+    readCache,
+    refreshCache,
+    buildCatalog,
+    discover,
+    announce,
+    async dispose() {
+      clearInterval(heartbeat)
+    },
+  }
+}
+
+/** OpenCode 1.x still consumes the hooks returned by server(). */
+export const TinfoilProvider: Plugin = async ({ client }) => {
+  const provider = await createProvider((message) =>
+    client.tui.showToast({ body: { title: "Tinfoil", message, variant: "error" } }),
+  )
+  return {
+    // auth.loader is skipped for environment-only credentials. Install in
+    // config as well so every Tinfoil request passes through the same guard.
     async config(config) {
       const providers = ((config as Record<string, any>)["provider"] ??= {})
       const entry = (providers[PROVIDER_ID] ??= {})
       const options = (entry.options ??= {})
-      options.fetch = guardedFetch
-      guarded = true
-      debug("installed the request guard")
+      options.fetch = provider.guardedFetch
+      provider.installGuard()
     },
-
-    async dispose() {
-      clearInterval(heartbeat)
-    },
-
-    /**
-     * Registers "Tinfoil" under `opencode auth login` and, once a key is
-     * stored, hands opencode the guarded fetch.
-     *
-     * Deliberately does not wait for a verdict. This runs on the startup path,
-     * and the base URL it would have waited for is applied per request by
-     * `retarget` instead. Nothing is sent before verification either way: the
-     * guard is in the fetch.
-     */
+    dispose: provider.dispose,
     auth: {
       provider: PROVIDER_ID,
       methods: [{ type: "api", label: "Tinfoil API key" }],
       async loader(auth) {
-        // `auth()` is opencode's; a throw here would reach `Effect.promise` as
-        // a defect and take down startup rather than one provider.
         let stored: any
         try {
           stored = await auth()
         } catch (error) {
           debug(`could not read stored auth: ${errorMessage(error)}`)
         }
-        guarded = true
+        provider.installGuard()
         return {
           ...(stored?.key ? { apiKey: stored.key } : {}),
-          fetch: guardedFetch,
+          fetch: provider.guardedFetch,
         }
       },
     },
-
-    provider: {
-      id: PROVIDER_ID,
-      models: discover,
-    },
-
-    // Deliberately not awaited. opencode awaits this hook for every event, so
-    // anything slow here is felt on the session's critical path; the status
-    // message is cosmetic and the request guard is what actually enforces.
+    provider: { id: PROVIDER_ID, models: provider.discover },
     async event() {
-      void announce()
+      void provider.announce()
     },
   }
 }
 
-export default TinfoilProvider
+/**
+ * OpenCode 2 uses setup() and owns credential resolution. Its native provider
+ * transport does not accept a custom fetch, so select its supported AI SDK
+ * driver and supply our guarded transport when that SDK is constructed.
+ */
+const plugin: PluginV2 & PluginModule = {
+  id: PROVIDER_ID,
+  server: TinfoilProvider,
+  async setup(ctx) {
+    const provider = await createProvider()
+    try {
+      await ctx.aisdk.hook("sdk", async (event) => {
+        if (event.model.providerID !== PROVIDER_ID) return
+        const { createOpenAICompatible } = await import("@ai-sdk/openai-compatible")
+        event.sdk = createOpenAICompatible({
+          ...event.options,
+          name: PROVIDER_ID,
+          baseURL: event.options.baseURL,
+          includeUsage: event.options.includeUsage !== false,
+          fetch: provider.guardedFetch,
+        })
+      }, { providerID: PROVIDER_ID })
+
+      // OpenCode 2 retries unknown provider errors indefinitely. A rejected
+      // attestation needs to reach the user; the next request can revalidate.
+      await ctx.session.hook("retry", (event) => {
+        if (event.error.message.startsWith(BLOCKED_REQUEST)) event.decision = { retry: false }
+      })
+
+      const cached = await provider.readCache()
+      void provider.refreshCache()
+      await ctx.provider.transform((editor) => {
+        const source = editor.get(PROVIDER_ID)
+        if (!source) return
+        const existing = Object.fromEntries(source.models)
+        const models = (cached && provider.buildCatalog(existing, cached, 2)) || existing
+        editor.update(PROVIDER_ID, (draft) => {
+          draft.package = "aisdk:@ai-sdk/openai-compatible"
+        })
+        editor.models.set(PROVIDER_ID, Object.values(models).map((model) => ({
+          ...model,
+          package: "aisdk:@ai-sdk/openai-compatible",
+        })))
+      })
+      provider.installGuard()
+      return provider.dispose
+    } catch (error) {
+      await provider.dispose()
+      throw error
+    }
+  },
+}
+
+export default plugin

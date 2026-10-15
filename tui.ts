@@ -1,8 +1,9 @@
 // The TUI half of the plugin. opencode loads this from the "./tui" subpath
 // export, in the TUI process — separate from the server half in tinfoil.ts.
-// It is registered in tui.json, not in the `plugin` array of opencode.json;
-// `opencode plugin <spec>` writes both.
+// OpenCode 2 discovers both entry points from `plugins` in opencode.json.
+// OpenCode 1.x registers this half separately in tui.json.
 import type { TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
+import type { Context, Definition } from "@opencode/plugin/tui/plugin"
 import { watch, type FSWatcher } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -113,9 +114,18 @@ type JsxFactory = (
   props?: Record<string, unknown> | null,
 ) => unknown
 
-const plugin: TuiPluginModule = {
+const plugin = {
   id: "tinfoil",
-  async tui(api: TuiPluginApi) {
+  async tui(api: TuiPluginApi): Promise<void> {
+    await plugin.setup(api)
+  },
+  async setup(api: TuiPluginApi | Context) {
+    const legacy = "lifecycle" in api
+    const cleanup: Array<() => void> = []
+    const onDispose = (fn: () => void) => {
+      if (legacy) api.lifecycle.onDispose(fn)
+      else cleanup.push(fn)
+    }
     /**
      * Imported here rather than at the top of the file, deliberately.
      *
@@ -156,7 +166,7 @@ const plugin: TuiPluginModule = {
         if (!changed || basename(String(changed)) === basename(STATUS_PATH)) void refresh()
       })
       watcher.on("error", () => watcher?.close())
-      api.lifecycle.onDispose(() => watcher?.close())
+      onDispose(() => watcher?.close())
       debug("watching the status file")
     } catch (error) {
       // The directory may not exist yet, or the platform may not support
@@ -165,14 +175,14 @@ const plugin: TuiPluginModule = {
     }
 
     const timer = setInterval(() => void refresh(), POLL_MS)
-    api.lifecycle.onDispose(() => clearInterval(timer))
+    onDispose(() => clearInterval(timer))
 
     // Re-read immediately on session activity, so the panel is right at the
     // moment someone looks at it rather than up to a poll interval later.
-    api.lifecycle.onDispose(api.event.on("session.updated", () => void refresh()))
+    if (legacy) onDispose(api.event.on("session.updated", () => void refresh()))
 
     /**
-     * The detail view, and the reason the `/tinfoil` command is gone. This runs
+     * The detail view behind `/tinfoil`. This runs
      * entirely in the TUI: no message, no model turn, nothing added to the
      * conversation and no context re-sent. The report text was rendered by the
      * server half, so what it shows is what that process actually verified.
@@ -204,7 +214,7 @@ const plugin: TuiPluginModule = {
        * pushed the whole thing to the middle of the screen and off the bottom.
        * Passing the body directly puts it where the command palette sits.
        */
-      const theme = api.theme.current
+      const theme = legacy ? api.theme.current : api.theme
 
       /**
        * Nothing in the overlay bounds a child's height — `dialog.setSize` picks
@@ -215,35 +225,37 @@ const plugin: TuiPluginModule = {
       const rows = api.renderer.terminalHeight
       const viewportRows = Math.max(4, Math.min(lines.length, rows - Math.floor(rows / 4) - 7))
 
-      api.ui.dialog.replace(
-        () =>
-          jsx("box", {
-            flexDirection: "column",
-            paddingLeft: 2,
-            paddingRight: 2,
-            children: [
-              jsx("text", { fg: theme.text, children: "Tinfoil verification" }),
-              jsx("scrollbox", {
-                focused: true,
-                scrollY: true,
-                height: viewportRows,
-                marginTop: 1,
-                // One text per line rather than one blob with newlines: the
-                // scrollbox measures its content from child heights, and a
-                // single multi-line child reports one row and never scrolls.
-                children: lines.map((line) => jsx("text", { fg: theme.text, children: line })),
-              }),
-              jsx("text", {
-                fg: theme.textMuted,
-                marginTop: 1,
-                children: lines.length > viewportRows ? "↑/↓ scroll · esc close" : "esc close",
-              }),
-            ],
-          }) as never,
-      )
-      // After `replace`, not before: it resets the stack size to "medium" (60
-      // columns) on the way in, which wrapped every digest line in half.
-      api.ui.dialog.setSize("xlarge")
+      const render = () =>
+        jsx("box", {
+          flexDirection: "column",
+          paddingLeft: 2,
+          paddingRight: 2,
+          children: [
+            jsx("text", { fg: theme.text, children: "Tinfoil verification" }),
+            jsx("scrollbox", {
+              focused: true,
+              scrollY: true,
+              height: viewportRows,
+              marginTop: 1,
+              // One text per line rather than one blob with newlines: the
+              // scrollbox measures its content from child heights, and a
+              // single multi-line child reports one row and never scrolls.
+              children: lines.map((line) => jsx("text", { fg: theme.text, children: line })),
+            }),
+            jsx("text", {
+              fg: theme.textMuted,
+              marginTop: 1,
+              children: lines.length > viewportRows ? "↑/↓ scroll · esc close" : "esc close",
+            }),
+          ],
+        }) as never
+      if (legacy) {
+        api.ui.dialog.replace(render)
+        api.ui.dialog.setSize("xlarge")
+      } else {
+        api.ui.dialog.show(render)
+        api.ui.dialog.set({ size: "xlarge" })
+      }
     }
 
     /**
@@ -260,8 +272,8 @@ const plugin: TuiPluginModule = {
      * Either entry point runs entirely in the TUI process: no message, no model
      * turn, nothing added to the conversation and no context re-sent.
      */
-    if (api.command?.register) {
-      api.lifecycle.onDispose(
+    if (legacy && api.command?.register) {
+      onDispose(
         api.command.register(() => [
           {
             title: "Tinfoil: verification details",
@@ -276,8 +288,18 @@ const plugin: TuiPluginModule = {
         ]),
       )
       debug("registered /tinfoil and the palette entry")
-    } else {
-      debug("api.command.register unavailable; sidebar panel only")
+    } else if (!legacy) {
+      api.keymap.layer(() => ({
+        mode: "global",
+        commands: [{
+          id: "tinfoil.details",
+          title: "Tinfoil: verification details",
+          group: "Plugin",
+          palette: true,
+          slash: { name: "tinfoil" },
+          run: showDetails,
+        }],
+      }))
     }
 
     /**
@@ -297,7 +319,7 @@ const plugin: TuiPluginModule = {
         marginTop: 1,
         children: () => {
           const current = view()
-          const theme = api.theme.current
+          const theme = legacy ? api.theme.current : api.theme
           const headline =
             current.kind === "verified"
               ? `Tinfoil ${MARK_OK} encrypted`
@@ -321,14 +343,15 @@ const plugin: TuiPluginModule = {
         },
       })
 
-    api.slots.register({
-      slots: {
-        sidebar_content: () => TinfoilPanel() as never,
-      },
-    })
+    if (legacy) {
+      api.slots.register({ slots: { sidebar_content: () => TinfoilPanel() as never } })
+    } else {
+      onDispose(api.ui.slot({ prepend: "sidebar.content", render: () => TinfoilPanel() as never }))
+    }
 
     debug("sidebar panel registered")
+    return () => cleanup.forEach((dispose) => dispose())
   },
-}
+} satisfies TuiPluginModule & Definition
 
 export default plugin

@@ -7,6 +7,7 @@
 	"main": "./tinfoil.ts",
 	"exports": {
 		".": "./tinfoil.ts",
+		"./server": "./server.ts",
 		"./tui": "./tui.ts"
 	},
 	"repository": {
@@ -28,11 +29,13 @@
 	],
 	"peerDependencies": {
 		"@opencode-ai/plugin": "*",
+		"@opencode/plugin": "^2.0.30",
 		"@opentui/core": ">=0.5.0",
 		"@opentui/solid": ">=0.5.0",
 		"solid-js": "^1.9.0"
 	},
 	"files": [
+		"server.ts",
 		"tinfoil.ts",
 		"tui.ts",
 		"README.md",
@@ -41,23 +44,29 @@
 	"scripts": {
 		"build": "echo 'nothing to build'",
 		"check": "tsc --noEmit",
-		"prepublishOnly": "npm run check"
+		"test": "node --experimental-test-module-mocks --test test/*.test.mjs",
+		"prepublishOnly": "npm run check && npm test"
 	},
 	"publishConfig": {
 		"access": "public"
 	},
 	"dependencies": {
+		"@ai-sdk/openai-compatible": "^2.0.41",
 		"tinfoil": "^1.2.1"
 	},
 	"devDependencies": {
 		"@opencode-ai/plugin": "^1.18.27",
+		"@opencode/plugin": "^2.0.30",
+		"@opentui/core": "^0.5.17",
+		"@opentui/solid": "^0.5.17",
 		"@types/node": "^24.0.0",
-		"typescript": "^5.9.0",
-		"@opentui/core": "^0.5.11",
-		"@opentui/solid": "^0.5.11",
-		"solid-js": "^1.9.0"
+		"solid-js": "^1.9.0",
+		"typescript": "^5.9.0"
 	},
 	"peerDependenciesMeta": {
+		"@opencode/plugin": {
+			"optional": true
+		},
 		"@opentui/core": {
 			"optional": true
 		},

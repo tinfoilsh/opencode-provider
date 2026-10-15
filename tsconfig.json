@@ -13,5 +13,5 @@
     "verbatimModuleSyntax": true,
     "jsx": "preserve"
   },
-  "include": ["tinfoil.ts", "tui.ts"]
+  "include": ["server.ts", "tinfoil.ts", "tui.ts"]
 }
