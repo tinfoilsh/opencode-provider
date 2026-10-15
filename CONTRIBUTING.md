@@ -1,5 +1,8 @@
 # Contributing
 
+For normal installation, follow the [npm setup instructions](README.md#setup).
+The checkout workflow below is for developing the plugin.
+
 ## Running from a checkout
 
 On OpenCode 2, add the checkout directory to `plugins` in
@@ -147,6 +150,9 @@ sides of the cache, and never let a bad entry escape as a rejection from
 - `npm run check`
 - `npm pack --dry-run` — should list exactly `LICENSE`, `README.md`,
   `package.json`, `server.ts`, `tinfoil.ts` and `tui.ts`
+- Validate the packaged release through OpenCode's package installer, including
+  automatic loading of the sidebar and `/tinfoil`; a checkout path bypasses
+  package resolution and dependency installation.
 - Check fail-closed in both auth configurations: with a saved credential,
   and with `TINFOIL_API_KEY` set and no saved credential. Break verification (for example
   by constructing the client against a config repo that cannot resolve) and

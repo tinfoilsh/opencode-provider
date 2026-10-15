@@ -9,13 +9,18 @@ secure enclaves that even Tinfoil cannot read into.
 
 ## Setup
 
+Supports OpenCode 1.19.1+ (1.x) and 2.0.30+.
+
 1. Install the plugin (OpenCode 2):
 
    ```bash
    opencode plugin add @tinfoilsh/opencode-provider
    ```
 
-   This installs globally. For OpenCode 1.x, use
+   OpenCode downloads the package from npm and installs the provider and sidebar
+   globally. This is the [standard OpenCode 2 installation flow](https://opencode.ai/v2/docs/plugins#manage).
+
+   For OpenCode 1.x, use
    `opencode plugin @tinfoilsh/opencode-provider --global` instead.
 
 2. Set your API key:
