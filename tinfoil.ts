@@ -33,6 +33,27 @@ const BLOCKED_REQUEST = "Tinfoil: refusing to send this request."
 const TINFOIL_HOST = /(^|\.)tinfoil\.sh$/
 
 /**
+ * Where OpenCode 2 is told the Tinfoil provider lives. `.invalid` can never
+ * resolve (RFC 6761), so a Tinfoil request that reaches the network without
+ * passing through `guardedFetch` — which is the only thing that retargets it —
+ * fails at DNS, before the API key or the prompt leave the machine.
+ */
+const SENTINEL_HOST = "enclave.tinfoil.invalid"
+const SENTINEL_BASE_URL = `https://${SENTINEL_HOST}/v1`
+
+/**
+ * The model package for Tinfoil models on OpenCode 2. Not the bare
+ * `aisdk:@ai-sdk/openai-compatible`: OpenCode 2 rewrites that package to its
+ * native transport whenever the user's config has a `providers.tinfoil` entry,
+ * and the native transport never calls the `sdk` hook that installs the guard.
+ * A `file://` specifier is left alone and imported directly.
+ */
+const SDK_PACKAGE = `aisdk:${import.meta.resolve("@ai-sdk/openai-compatible")}`
+
+/** The base URL OpenCode 2 reports for every request on the AI SDK route. */
+const AISDK_PLACEHOLDER_URL = "https://ai-sdk.local"
+
+/**
  * Where this half publishes its verdict for the TUI half to render.
  *
  * The two halves run in different processes (server vs TUI). Keep the status
@@ -203,7 +224,7 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
       // Already relative; the SDK resolves it against the verified enclave.
       return input
     }
-    if (!TINFOIL_HOST.test(url.hostname)) return input
+    if (!TINFOIL_HOST.test(url.hostname) && url.hostname !== SENTINEL_HOST) return input
     const target = `${new URL(base).origin}${url.pathname}${url.search}`
     if (target === url.href) return input
     debug(`retargeting ${url.origin} to the attested enclave`)
@@ -654,13 +675,15 @@ const plugin: PluginV2 & PluginModule = {
   async setup(ctx) {
     const provider = await createProvider()
     try {
+      // Whatever package a Tinfoil model ends up with, the SDK it gets is this
+      // one: pinned to the sentinel, with the guard as its only transport.
       await ctx.aisdk.hook("sdk", async (event) => {
         if (event.model.providerID !== PROVIDER_ID) return
         const { createOpenAICompatible } = await import("@ai-sdk/openai-compatible")
         event.sdk = createOpenAICompatible({
           ...event.options,
           name: PROVIDER_ID,
-          baseURL: event.options.baseURL,
+          baseURL: SENTINEL_BASE_URL,
           includeUsage: event.options.includeUsage !== false,
           fetch: provider.guardedFetch,
         })
@@ -672,17 +695,47 @@ const plugin: PluginV2 & PluginModule = {
         if (event.error.message.startsWith(BLOCKED_REQUEST)) event.decision = { retry: false }
       })
 
+      // The native transport cannot be guarded. On the AI SDK route this base
+      // URL is a fixed placeholder, so anything else means a Tinfoil request is
+      // about to go out natively: refuse it here, with a reason, rather than
+      // leaving the sentinel to fail it at DNS.
+      await ctx.session.hook("model.request", (event) => {
+        if (event.baseURL === undefined || event.baseURL === AISDK_PLACEHOLDER_URL) return
+        event.baseURL = SENTINEL_BASE_URL
+        throw new Error(
+          `${BLOCKED_REQUEST} OpenCode routed it around the Tinfoil plugin's encrypted transport, ` +
+            `so it would not be encrypted to a verified enclave. Remove any "package" override for ` +
+            `the tinfoil provider from your opencode config. See ${HELP_URL}`,
+        )
+      }, { providerID: PROVIDER_ID })
+
+      // Pinned on the provider, every model and every variant, overwriting
+      // anything from the user's config: a base URL that is not the sentinel
+      // is a destination that does not pass through the guard.
+      const pin = (target: { package?: string; settings?: Record<string, any>; variants?: any[] }) => {
+        target.package = SDK_PACKAGE
+        target.settings = { ...target.settings, baseURL: SENTINEL_BASE_URL }
+        for (const variant of target.variants ?? []) {
+          if (variant?.settings && "baseURL" in variant.settings) variant.settings.baseURL = SENTINEL_BASE_URL
+        }
+      }
+
       await ctx.provider.transform((editor) => {
         const source = editor.get(PROVIDER_ID)
         if (!source) return
         const models = provider.discover(Object.fromEntries(source.models), 2)
-        editor.update(PROVIDER_ID, (draft) => {
-          draft.package = "aisdk:@ai-sdk/openai-compatible"
-        })
-        editor.models.set(PROVIDER_ID, Object.values(models).map((model) => ({
-          ...model,
-          package: "aisdk:@ai-sdk/openai-compatible",
-        })))
+        editor.update(PROVIDER_ID, pin as any)
+        editor.models.set(PROVIDER_ID, Object.values(models).map((model) => {
+          const pinned = structuredClone(model)
+          pin(pinned)
+          return pinned
+        }))
+      })
+
+      // And again on the final model collection, which a user's config or a
+      // later plugin can still edit after the provider transform.
+      await ctx.model.transform((editor) => {
+        for (const model of editor.list(PROVIDER_ID)) editor.update(PROVIDER_ID, String(model.id), pin as any)
       })
       provider.installGuard()
       return provider.dispose
