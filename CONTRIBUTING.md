@@ -46,7 +46,7 @@ npm run check
 
 ## How the two halves fit together
 
-`tinfoil.ts` runs in opencode's server process. It owns the `SecureClient`,
+`tinfoil.ts` runs in opencode's server process. It owns the `RouterHTTPClient`,
 verifies the enclave, and installs the guarded fetch that blocks unverified
 requests. `tui.ts` runs in the separate TUI process and draws the sidebar panel
 and the `/tinfoil` dialog.
@@ -92,8 +92,8 @@ one that unloads the guard.
 **On OpenCode 1.x, install the guarded fetch from the `config` hook, not only from
 `auth.loader`.** opencode skips `auth.loader` entirely unless the provider has a
 stored auth entry, so a user with `TINFOIL_API_KEY` set and no `opencode auth
-login` would otherwise get opencode's own fetch, with no attestation and no body
-sealing. The status file carries a `guarded` flag for exactly this reason: a
+login` would otherwise get opencode's own fetch, with no attestation and no
+connection pinning. The status file carries a `guarded` flag for exactly this reason: a
 verified enclave says nothing if opencode is not going through us to reach it.
 
 **Keep both entry points on the default definition.** OpenCode 2 requires

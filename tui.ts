@@ -14,7 +14,7 @@ import { basename, dirname, join } from "node:path"
  * Tinfoil status panel for opencode's sidebar, alongside Context and LSP.
  *
  * This half renders and nothing else. It never verifies anything itself: the
- * server half owns the SecureClient and is what actually blocks unverified
+ * server half owns the verified client and is what actually blocks unverified
  * requests, so it publishes its verdict and this reads it. Attesting again here
  * would be a second opinion that could disagree with the one being enforced,
  * and a sidebar claiming "verified" while the guard fails closed is worse than

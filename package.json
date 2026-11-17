@@ -50,7 +50,7 @@
 	},
 	"dependencies": {
 		"@ai-sdk/openai-compatible": "^2.0.41",
-		"tinfoil": "^1.2.1"
+		"tinfoil": "^2.0.0-rc.2"
 	},
 	"devDependencies": {
 		"@opencode-ai/plugin": "^1.18.27",
@@ -80,5 +80,10 @@
 	},
 	"engines": {
 		"opencode": ">=1.19.1 <2 || >=2.0.30"
+	},
+	"overrides": {
+		"tinfoil": {
+			"@ai-sdk/openai-compatible": "$@ai-sdk/openai-compatible"
+		}
 	}
 }
