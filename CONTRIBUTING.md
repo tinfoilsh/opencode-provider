@@ -96,6 +96,12 @@ login` would otherwise get opencode's own fetch, with no attestation and no
 connection pinning. The status file carries a `guarded` flag for exactly this reason: a
 verified enclave says nothing if opencode is not going through us to reach it.
 
+**Point both OpenCode versions at the sentinel host.** The provider's base URL is
+`https://enclave.tinfoil.invalid/v1` on 1.x as well as 2, and only the guarded
+fetch rewrites it to the verified enclave. models.dev gives Tinfoil its real
+host, so without this a code path that skipped the guarded fetch would reach
+Tinfoil unverified. With it, such a request fails at DNS.
+
 **Keep both entry points on the default definition.** OpenCode 2 requires
 `{ id, setup }`; OpenCode 1.x consumes `{ id, server }`. Both call the same
 verifier and guard. OpenCode 2 resolves saved and environment credentials itself;
