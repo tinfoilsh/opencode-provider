@@ -3,7 +3,7 @@
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 import type { Plugin as PluginV2 } from "@opencode/plugin/promise/plugin"
 // Load the SDK inside the factory so its evaluation overlaps OpenCode startup.
-import type { SecureClient as SecureClientInstance, VerificationDocument } from "tinfoil"
+import type { RouterHTTPClient } from "tinfoil"
 import { randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -15,8 +15,8 @@ import { dirname, join } from "node:path"
  * opencode already knows the `tinfoil` provider and its models through
  * models.dev, so this plugin does not introduce a provider — it upgrades the
  * transport of the one that is already there. The `tinfoil` SDK verifies the
- * enclave's SEV-SNP attestation and its Sigstore-signed code digest in
- * process, then seals every request body to the attested HPKE key. No local
+ * enclave's attestation document and its Sigstore-signed code release in
+ * process, then pins every connection to the attested TLS key. No local
  * proxy, and no base URL, API key, or model list in opencode.json.
  *
  * Not a full external verifier (no independent AMD signature-chain check);
@@ -58,7 +58,7 @@ const AISDK_PLACEHOLDER_URL = "https://ai-sdk.local"
  *
  * The two halves run in different processes (server vs TUI). Keep the status
  * contract used by the OpenCode 1.x integration: the process that owns the
- * SecureClient writes what it decided, and the sidebar renders that verdict.
+ * verified client writes what it decided, and the sidebar renders that verdict.
  *
  * Verification is a property of the enclave, not of a project, so a single
  * shared file is correct even with several opencode windows open.
@@ -125,6 +125,9 @@ const debug = (message: string) => {
 
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
+/** What a successful verification proves; the SDK re-exports it only as `current`. */
+type Verification = NonNullable<RouterHTTPClient["current"]>
+
 // =============================================================================
 // Verification state
 // =============================================================================
@@ -133,7 +136,10 @@ const errorMessage = (error: unknown) => (error instanceof Error ? error.message
  * `pending` only exists before the first attempt settles. Everything that
  * needs a verdict awaits `verify()` rather than reading this directly.
  */
-type VerifyState = { kind: "pending" } | { kind: "verified" } | { kind: "failed"; reason: string }
+type VerifyState =
+  | { kind: "pending" }
+  | { kind: "verified"; client: RouterHTTPClient }
+  | { kind: "failed"; reason: string }
 
 const createProvider = async (notify?: (message: string) => Promise<unknown>) => {
   let state: VerifyState = { kind: "pending" }
@@ -144,23 +150,19 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
   let attempt: Promise<VerifyState> | undefined
   let lastAttemptAt = 0
 
-  let secure: SecureClientInstance | undefined
-
   // Catch SDK loading and verification failures here: unloading the plugin
   // leaves OpenCode's unguarded provider available. Cache failures for the
-  // cooldown; SecureClient.ready() owns resetting failed initialization.
+  // cooldown. A client only exists once its router has verified, and from then
+  // on its fetch verifies again by itself, so only a failure needs a retry.
   const verify = (): Promise<VerifyState> => {
     if (state.kind === "failed" && Date.now() - lastAttemptAt >= REVALIDATE_COOLDOWN_MS) attempt = undefined
     attempt ??= (async () => {
       lastAttemptAt = Date.now()
       try {
-        if (!secure) {
-          const { SecureClient } = await import("tinfoil")
-          secure = new SecureClient()
-        }
-        await secure.ready()
-        state = { kind: "verified" }
-        debug(`verified ${secure.getVerificationDocument().releaseDigest}`)
+        const { RouterHTTPClient } = await import("tinfoil")
+        const client = await RouterHTTPClient.create()
+        state = { kind: "verified", client }
+        debug(`verified ${client.current?.codeDigest}`)
       } catch (error) {
         state = { kind: "failed", reason: errorMessage(error) }
         debug(`verification failed: ${state.reason}`)
@@ -171,8 +173,8 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
     return attempt
   }
 
-  const document = (): VerificationDocument | undefined =>
-    state.kind === "verified" ? secure?.getVerificationDocument() : undefined
+  /** Read at render time so a verification the SDK renewed by itself shows up. */
+  const verification = (): Verification | undefined => (state.kind === "verified" ? state.client.current : undefined)
 
   // =============================================================================
   // Transport
@@ -183,9 +185,10 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
    * the machine — not the API key, system prompt, tool definitions, or the
    * user's code. A failed verification cannot send your prompts anywhere.
    *
-   * `secure.fetch` seals each body to the attested HPKE key, refuses any
-   * origin other than the verified enclave, and re-attests on its own when the
-   * server rotates keys.
+   * The client's fetch pins each connection to the attested key (or, on a Bun
+   * older than 1.4, seals each request to it), refuses any
+   * origin other than the verified enclave, and verifies again on its own when
+   * the verification expires or the server rotates keys.
    */
   const guardedFetch: typeof fetch = async (input, init) => {
     const current = await verify()
@@ -195,7 +198,7 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
           `${current.kind === "failed" ? current.reason : "verification did not complete"}. See ${HELP_URL}`,
       )
     }
-    return secure!.fetch(retarget(input), init)
+    return current.client.fetch(retarget(input, current.client.baseURL), init)
   }
 
   /**
@@ -213,16 +216,16 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
    * untouched for the SDK to refuse, so a bug elsewhere in opencode cannot
    * turn this into an open relay to the enclave.
    */
-  const retarget = (input: Parameters<typeof fetch>[0]): Parameters<typeof fetch>[0] => {
-    const base = secure?.getBaseURL()
-    if (!base) return input
+  const retarget = (input: Parameters<typeof fetch>[0], base: string): Parameters<typeof fetch>[0] => {
     const requested = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
     let url: URL
     try {
       url = new URL(requested)
     } catch {
-      // Already relative; the SDK resolves it against the verified enclave.
-      return input
+      // Relative: the SDK's fetch takes only absolute URLs, so resolve it
+      // against the verified enclave here.
+      const target = new URL(requested, base).href
+      return typeof input === "string" || input instanceof URL ? target : new Request(target, input)
     }
     if (!TINFOIL_HOST.test(url.hostname) && url.hostname !== SENTINEL_HOST) return input
     const target = `${new URL(base).origin}${url.pathname}${url.search}`
@@ -432,7 +435,7 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
         debug("skipping catalog refresh: not verified")
         return
       }
-      const response = await secure!.fetch("/v1/models", {
+      const response = await verdict.client.fetch(new URL("v1/models", verdict.client.baseURL), {
         signal: AbortSignal.timeout(DISCOVER_TIMEOUT_MS),
       })
       if (!response.ok) throw new Error(`HTTP ${response.status} from /v1/models`)
@@ -468,10 +471,9 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
    * digest and public keys — but nothing else has any business writing what
    * the sidebar reads.
    *
-   * 0700 on the directory to match what the SDK creates it with. Whoever gets
-   * there first decides: recursive `mkdir` leaves an existing directory's mode
-   * alone, so on a machine where this plugin runs before the SDK has written
-   * anything, a default 0755 would be what `~/.tinfoil` keeps.
+   * 0700 on the directory, which 1.x of the SDK also created it with. Whoever
+   * gets there first decides: recursive `mkdir` leaves an existing directory's
+   * mode alone, so a default 0755 would be what `~/.tinfoil` keeps.
    */
   const writeAtomic = async (path: string, contents: string): Promise<void> => {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 })
@@ -493,39 +495,24 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
       const reason = verdict.kind === "failed" ? verdict.reason : "verification did not complete"
       return `Tinfoil unverified [!] — ${reason}. Requests are blocked. See ${HELP_URL}`
     }
-    const doc = document()
-    return `Tinfoil verified [✓] ${doc?.releaseTag ?? "unknown"} ${shortHash(doc?.releaseDigest)}`
+    const facts = verification()
+    return `Tinfoil verified [✓] ${facts?.codeTag || "unknown"} ${shortHash(facts?.codeDigest)}`
   }
 
-  /** One step line, in the order the verifier performs the steps. */
-  const stepLines = (doc: VerificationDocument): string[] => {
-    const steps = doc.steps
-    if (!steps) return []
-    const entries: Array<[string, { status?: string; error?: string } | undefined]> = [
-      ["Fetch digest", steps.fetchDigest],
-      ["Verify code", steps.verifyCode],
-      ["Verify enclave", steps.verifyEnclave],
-      ["Compare measurements", steps.compareMeasurements],
-      ["Verify certificate", steps.verifyCertificate],
-    ]
-    return entries
-      .filter((pair): pair is [string, { status?: string; error?: string }] => pair[1] !== undefined)
-      .map(([name, step]) => `  ${name.padEnd(22)}${step.status ?? "unknown"}${step.error ? `: ${step.error}` : ""}`)
-  }
+  const timeOf = (value?: Date) => value?.toISOString() ?? "unknown"
 
   /** The full document, as `/tinfoil` renders it. */
   const report = (verdict: VerifyState): string => {
-    const doc = document()
-    if (verdict.kind !== "verified" || !doc) {
+    const facts = verification()
+    if (verdict.kind !== "verified" || !facts) {
       return [
         summary(verdict),
         "",
-        `Reason:  ${verdict.kind === "failed" ? verdict.reason : "no verification document"}`,
+        `Reason:  ${verdict.kind === "failed" ? verdict.reason : "no verification"}`,
         `The next request retries verification. See ${HELP_URL}`,
       ].join("\n")
     }
 
-    const enclave = doc.enclaveMeasurement ?? {}
     return [
       summary(verdict),
       "",
@@ -535,29 +522,24 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
       "  and that is the only place they are ever decrypted.",
       "",
       "Connection",
-      `  Base URL:        ${secure?.getBaseURL() ?? "unknown"}`,
-      `  Enclave host:    ${doc.enclaveHost || "unknown"}`,
-      `  Router endpoint: ${doc.selectedRouterEndpoint || "unknown"}`,
-      `  Config repo:     ${doc.configRepo || "unknown"}`,
+      `  Base URL:        ${verdict.client.baseURL}`,
+      `  Enclave host:    ${verdict.client.enclave || "unknown"}`,
+      `  Config repo:     ${facts.configRepo || "unknown"}`,
       "",
       "Release",
-      `  Tag:             ${doc.releaseTag ?? "unknown"}`,
-      `  Digest:          ${doc.releaseDigest || "unknown"}`,
-      `  Code print:      ${doc.codeFingerprint || "unknown"}`,
-      `  Enclave print:   ${doc.enclaveFingerprint || "unknown"}`,
+      `  Tag:             ${facts.codeTag || "unknown"}`,
+      `  Digest:          ${facts.codeDigest || "unknown"}`,
+      ...(facts.runtime ? [`  Runtime:         ${facts.runtime.repo}@${facts.runtime.tag} (${shortHash(facts.runtime.digest)})`] : []),
+      ...(facts.config ? [`  Config:          ${facts.config.name || "unnamed"} (${shortHash(facts.config.digest)})`] : []),
       "",
       "Attested keys",
-      `  TLS public key:  ${doc.tlsPublicKey || "unknown"}`,
-      `  TLS fingerprint: ${enclave.tlsPublicKeyFingerprint ?? "unknown"}`,
-      `  HPKE public key: ${doc.hpkePublicKey || enclave.hpkePublicKey || "unknown"}`,
-      "",
-      "Verification steps",
-      ...stepLines(doc),
+      `  TLS fingerprint: ${facts.tlsPublicKeyFP ?? "unknown"}`,
+      `  HPKE public key: ${facts.hpkePublicKey ?? "unknown"}`,
       "",
       "Verifier",
-      `  Verifier:        ${doc.verifier?.name ?? "unknown"} ${doc.verifier?.version ?? ""}`.trimEnd(),
-      `  Verified:        ${doc.securityVerified === true ? "yes" : "(SDK did not mark this document verified)"}`,
-      `  Verified at:     ${doc.verifiedAt ?? "unknown"}`,
+      `  Verifier:        ${facts.metadata.verifier.name} ${facts.metadata.verifier.version}`,
+      `  Verified at:     ${timeOf(facts.metadata.verifiedAt)}`,
+      `  Fresh until:     ${facts.freshnessExpiresAt ? timeOf(facts.freshnessExpiresAt) : "no expiry"}`,
     ].join("\n")
   }
 
@@ -569,16 +551,18 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
   const publishStatus = async () => {
     const verdict = state
     if (verdict.kind === "pending") return
-    const doc = document()
+    const facts = verification()
     try {
+      // Field names predate SDK 2.0's `codeTag` and `codeDigest`; kept so a
+      // sidebar from an older plugin version still reads them.
       const status: TinfoilStatus = {
         v: STATUS_VERSION,
         verified: verdict.kind === "verified",
         guarded,
         ...(verdict.kind === "failed" ? { reason: verdict.reason } : {}),
-        ...(doc?.releaseTag ? { releaseTag: doc.releaseTag } : {}),
-        ...(doc?.releaseDigest ? { releaseDigest: doc.releaseDigest } : {}),
-        ...(doc?.enclaveHost ? { enclaveHost: doc.enclaveHost } : {}),
+        ...(facts?.codeTag ? { releaseTag: facts.codeTag } : {}),
+        ...(facts?.codeDigest ? { releaseDigest: facts.codeDigest } : {}),
+        ...(verdict.kind === "verified" ? { enclaveHost: verdict.client.enclave } : {}),
         report: report(verdict).split("\n"),
         at: Date.now(),
         pid: process.pid,
