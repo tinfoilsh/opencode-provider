@@ -114,6 +114,26 @@ const plugin = {
       if (legacy) api.lifecycle.onDispose(fn)
       else cleanup.push(fn)
     }
+
+    /**
+     * The four colors this plugin draws with. The two versions name them
+     * differently: OpenCode 1's theme is flat (`success`, `textMuted`), while
+     * OpenCode 2 nests them (`text.feedback.success.base`, `text.muted`). Read
+     * at render time, so a theme switch shows up.
+     */
+    const colors = () => {
+      if (legacy) {
+        const theme = api.theme.current
+        return { text: theme.text, muted: theme.textMuted, success: theme.success, error: theme.error }
+      }
+      const { text } = api.theme
+      return {
+        text: text.base,
+        muted: text.muted,
+        success: text.feedback.success.base,
+        error: text.feedback.error.base,
+      }
+    }
     /**
      * Imported here rather than at the top of the file, deliberately.
      *
@@ -202,7 +222,7 @@ const plugin = {
        * pushed the whole thing to the middle of the screen and off the bottom.
        * Passing the body directly puts it where the command palette sits.
        */
-      const theme = legacy ? api.theme.current : api.theme
+      const theme = colors()
 
       /**
        * Nothing in the overlay bounds a child's height — `dialog.setSize` picks
@@ -231,7 +251,7 @@ const plugin = {
               children: lines.map((line) => jsx("text", { fg: theme.text, children: line })),
             }),
             jsx("text", {
-              fg: theme.textMuted,
+              fg: theme.muted,
               marginTop: 1,
               children: lines.length > viewportRows ? "↑/↓ scroll · esc close" : "esc close",
             }),
@@ -307,7 +327,7 @@ const plugin = {
         marginTop: 1,
         children: () => {
           const current = view()
-          const theme = legacy ? api.theme.current : api.theme
+          const theme = colors()
           const headline =
             current.kind === "verified"
               ? `Tinfoil ${MARK_OK} encrypted`
@@ -325,9 +345,9 @@ const plugin = {
                   ? "  not routed through Tinfoil"
                   : "  waiting for attestation"
           const fg =
-            current.kind === "verified" ? theme.success : current.kind === "unknown" ? theme.textMuted : theme.error
+            current.kind === "verified" ? theme.success : current.kind === "unknown" ? theme.muted : theme.error
 
-          return [jsx("text", { fg, children: headline }), jsx("text", { fg: theme.textMuted, children: detail })]
+          return [jsx("text", { fg, children: headline }), jsx("text", { fg: theme.muted, children: detail })]
         },
       })
 
