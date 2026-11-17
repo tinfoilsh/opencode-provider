@@ -1,0 +1,197 @@
+# Does the plugin still install, load and guard requests in OpenCode?
+#
+# ci.yml typechecks, which says nothing about whether OpenCode loads the
+# plugin. OpenCode fails open when it doesn't: the `tinfoil` provider still
+# exists via models.dev, so the session keeps working with no attestation and
+# no warning. An OpenCode release can cause that without this repo changing,
+# hence the schedule.
+#
+# The assertion: the plugin points OpenCode at a host that never resolves and
+# only its verified fetch rewrites that to the enclave. So a request that comes
+# back with Tinfoil's own "Incorrect API key" went through the guard, and the
+# status file the plugin writes says it verified the enclave and was installed.
+name: Install test
+
+on:
+  schedule:
+    - cron: "0 14 * * *"
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+concurrency:
+  # The event is part of the key, so a push to main cannot replace a pending
+  # scheduled run in the same group.
+  group: install-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  # Superseding a pull request run is fine; cancelling the scheduled run would
+  # throw away the one whose failure opens an issue.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # What we are about to ship, against the newest OpenCode 1.x and 2.x and the
+  # oldest of each that package.json's `engines` claims.
+  tree:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 1 latest
+            major: "1"
+            package: opencode-ai@1
+          - name: 1 floor
+            major: "1"
+            package: opencode-ai@1.19.1
+          - name: 2 latest
+            major: "2"
+            package: "@opencode/cli@2"
+          - name: 2 floor
+            major: "2"
+            package: "@opencode/cli@2.0.30"
+    name: tree (opencode ${{ matrix.name }})
+    timeout-minutes: 20
+    env:
+      # Deliberately not a real key: Tinfoil rejecting it is the assertion, and
+      # nothing in this workflow should be able to spend money.
+      TINFOIL_API_KEY: tk_not_a_real_key
+      MAJOR: ${{ matrix.major }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      # Through env rather than inline interpolation, so the package spec can
+      # never be expanded into the shell command itself.
+      - name: Install OpenCode (${{ matrix.name }})
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          npm install --prefix "$RUNNER_TEMP/opencode" --no-fund --no-audit "$PACKAGE"
+          echo "$RUNNER_TEMP/opencode/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Report the OpenCode version
+        run: echo "opencode $(opencode --version)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # OpenCode loads a local plugin from the directory as it is, so its
+      # dependencies have to be there. Nothing here needs install scripts.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install the working tree as a plugin
+        run: |
+          if [ "$MAJOR" = 2 ]; then
+            mkdir -p ~/.config/opencode
+            printf '{ "plugins": ["%s"] }\n' "$GITHUB_WORKSPACE" > ~/.config/opencode/opencode.json
+          else
+            opencode plugin "$GITHUB_WORKSPACE" --global --force
+          fi
+
+      - name: A request goes through the verified guard
+        working-directory: ${{ runner.temp }}
+        run: '"$GITHUB_WORKSPACE/.github/scripts/assert-guarded.sh"'
+        shell: bash
+
+  # What users actually have. Between a fix landing on main and a release, this
+  # is the only leg that still reports the break they are hitting.
+  published:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - major: "1"
+            package: opencode-ai@1
+          - major: "2"
+            package: "@opencode/cli@2"
+    name: published (opencode ${{ matrix.major }} latest)
+    timeout-minutes: 20
+    env:
+      TINFOIL_API_KEY: tk_not_a_real_key
+      MAJOR: ${{ matrix.major }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Install OpenCode (${{ matrix.major }} latest)
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          npm install --prefix "$RUNNER_TEMP/opencode" --no-fund --no-audit "$PACKAGE"
+          echo "$RUNNER_TEMP/opencode/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Report the OpenCode version
+        run: echo "opencode $(opencode --version)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The README's install commands.
+      - name: Install the published plugin
+        run: |
+          if [ "$MAJOR" = 2 ]; then
+            opencode plugin add @tinfoilsh/opencode-provider
+          else
+            opencode plugin @tinfoilsh/opencode-provider --global
+          fi
+
+      - name: A request goes through the verified guard
+        working-directory: ${{ runner.temp }}
+        run: '"$GITHUB_WORKSPACE/.github/scripts/assert-guarded.sh"'
+        shell: bash
+
+  # A scheduled failure has to reach a person. A new issue emails repo watchers;
+  # a continuing failure comments rather than opening another one.
+  report:
+    name: report a scheduled failure
+    needs:
+      - tree
+      - published
+    if: |
+      always() &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main' &&
+      (needs.tree.result == 'failure' || needs.published.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write # open or comment on the issue announcing the break
+    steps:
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TREE: ${{ needs.tree.result }}
+          PUBLISHED: ${{ needs.published.result }}
+        run: |
+          title="Install test failing: the plugin does not guard requests in OpenCode"
+          body=$(printf '%s\n' \
+            "The scheduled install test failed, which usually means an OpenCode release changed how it loads plugins or sends provider requests." \
+            "" \
+            "- working tree: \`$TREE\`" \
+            "- published package: \`$PUBLISHED\`" \
+            "- run: $RUN_URL" \
+            "" \
+            "If only the published leg failed, a fix is on main but not released yet.")
+          existing=$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
