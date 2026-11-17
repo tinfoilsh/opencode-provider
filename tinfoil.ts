@@ -123,7 +123,20 @@ const debug = (message: string) => {
   if (process.env["TINFOIL_DEBUG"]) console.error(`[tinfoil] ${message}`)
 }
 
-const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error))
+const errorMessage = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error)
+  // The SDK retries verification once and appends the first attempt's error;
+  // drop it when both attempts failed the same way.
+  const attempts = /^(.*) \(first attempt: (.*)\)$/s.exec(message)
+  const [, last, first] = attempts ?? []
+  return last !== undefined && last === first ? last : message
+}
+
+/** End a reason with a period, so the text that follows it starts a new sentence. */
+const sentence = (reason: string) => {
+  const trimmed = reason.trim()
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`
+}
 
 /** What a successful verification proves; the SDK re-exports it only as `current`. */
 type Verification = NonNullable<RouterHTTPClient["current"]>
@@ -195,7 +208,7 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
     if (current.kind !== "verified") {
       throw new Error(
         `${BLOCKED_REQUEST} Enclave verification failed: ` +
-          `${current.kind === "failed" ? current.reason : "verification did not complete"}. See ${HELP_URL}`,
+          `${sentence(current.kind === "failed" ? current.reason : "verification did not complete")} See ${HELP_URL}`,
       )
     }
     return current.client.fetch(retarget(input, current.client.baseURL), init)
@@ -493,7 +506,7 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
   const summary = (verdict: VerifyState): string => {
     if (verdict.kind !== "verified") {
       const reason = verdict.kind === "failed" ? verdict.reason : "verification did not complete"
-      return `Tinfoil unverified [!] — ${reason}. Requests are blocked. See ${HELP_URL}`
+      return `Tinfoil unverified [!] — ${sentence(reason)} Requests are blocked. See ${HELP_URL}`
     }
     const facts = verification()
     return `Tinfoil verified [✓] ${facts?.codeTag || "unknown"} ${shortHash(facts?.codeDigest)}`
@@ -509,7 +522,7 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
         summary(verdict),
         "",
         `Reason:  ${verdict.kind === "failed" ? verdict.reason : "no verification"}`,
-        `The next request retries verification. See ${HELP_URL}`,
+        `A request made ${REVALIDATE_COOLDOWN_MS / 1000} seconds after a failure verifies again. See ${HELP_URL}`,
       ].join("\n")
     }
 
