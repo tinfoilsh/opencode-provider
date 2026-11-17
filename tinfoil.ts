@@ -212,7 +212,23 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
           `${sentence(current.kind === "failed" ? current.reason : "verification did not complete")} See ${HELP_URL}`,
       )
     }
-    return current.client.fetch(retarget(input, current.client.baseURL), init)
+    try {
+      return await current.client.fetch(retarget(input, current.client.baseURL), init)
+    } catch (error) {
+      // The client verifies again by itself when its verification expires or
+      // the server rotates keys. If that fails, stop calling the enclave
+      // verified: the sidebar would keep saying so, and OpenCode 2 retries an
+      // error it doesn't recognise forever, where it stops on ours.
+      if (!(error instanceof Error && (error as { category?: unknown }).category === "attestation")) throw error
+      const reason = errorMessage(error)
+      if (state === current) {
+        state = { kind: "failed", reason }
+        lastAttemptAt = Date.now()
+        attempt = Promise.resolve(state)
+        void publishStatus()
+      }
+      throw new Error(`${BLOCKED_REQUEST} Enclave verification failed: ${sentence(reason)} See ${HELP_URL}`)
+    }
   }
 
   /**
