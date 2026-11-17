@@ -33,10 +33,11 @@ const BLOCKED_REQUEST = "Tinfoil: refusing to send this request."
 const TINFOIL_HOST = /(^|\.)tinfoil\.sh$/
 
 /**
- * Where OpenCode 2 is told the Tinfoil provider lives. `.invalid` can never
- * resolve (RFC 6761), so a Tinfoil request that reaches the network without
- * passing through `guardedFetch` — which is the only thing that retargets it —
- * fails at DNS, before the API key or the prompt leave the machine.
+ * Where OpenCode, 1.x and 2, is told the Tinfoil provider lives. `.invalid` can
+ * never resolve (RFC 6761), so a Tinfoil request that reaches the network
+ * without passing through `guardedFetch` — which is the only thing that
+ * retargets it — fails at DNS, before the API key or the prompt leave the
+ * machine.
  */
 const SENTINEL_HOST = "enclave.tinfoil.invalid"
 const SENTINEL_BASE_URL = `https://${SENTINEL_HOST}/v1`
@@ -236,8 +237,11 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
       url = new URL(requested)
     } catch {
       // Relative: the SDK's fetch takes only absolute URLs, so resolve it
-      // against the verified enclave here.
-      const target = new URL(requested, base).href
+      // against the verified enclave here. A protocol-relative path would
+      // name another host; leave that for the SDK to refuse.
+      const resolved = new URL(requested, base)
+      if (resolved.origin !== new URL(base).origin) return input
+      const target = resolved.href
       return typeof input === "string" || input instanceof URL ? target : new Request(target, input)
     }
     if (!TINFOIL_HOST.test(url.hostname) && url.hostname !== SENTINEL_HOST) return input
@@ -376,8 +380,8 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
 
       model.id = id
       model.name = raw.name ?? id
-      // No `api.url`: `retarget` sends every request to the attested enclave,
-      // whichever router that turns out to be.
+      // `discover` points `api.url` at the sentinel on OpenCode 1; `retarget`
+      // sends every request to the attested enclave, whichever router that is.
       if (version === 1) model.api = { ...model.api, id }
       else model.modelID = id
       model.limit = {
@@ -470,12 +474,22 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
   // Both plugin APIs use the same startup snapshot. A broken cache must not
   // reject OpenCode 1's provider.models hook or OpenCode 2's transform.
   const discover = (existing: Record<string, any>, version: 1 | 2) => {
+    let models: Record<string, any>
     try {
-      return (cached && buildCatalog(existing, cached, version)) || existing
+      models = (cached && buildCatalog(existing, cached, version)) || existing
     } catch (error) {
       debug(`catalog build failed (${errorMessage(error)}), keeping the models.dev catalog`)
-      return existing
+      models = existing
     }
+    if (version === 2) return models
+    // models.dev gives every OpenCode 1 model the real Tinfoil host as its own
+    // URL. The provider's base URL already points at the sentinel, but don't
+    // leave which one OpenCode prefers to chance.
+    const pinned: Record<string, any> = {}
+    for (const [id, model] of Object.entries(models)) {
+      pinned[id] = model && typeof model === "object" ? { ...model, api: { ...model.api, url: SENTINEL_BASE_URL } } : model
+    }
+    return pinned
   }
 
   /**
@@ -634,6 +648,9 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
       const entry = (providers[PROVIDER_ID] ??= {})
       const options = (entry.options ??= {})
       options.fetch = provider.guardedFetch
+      // Otherwise the base URL is models.dev's real Tinfoil host, and any
+      // request that skipped the fetch above would reach it unverified.
+      options.baseURL = SENTINEL_BASE_URL
       provider.installGuard()
     },
     dispose: provider.dispose,
@@ -650,6 +667,7 @@ export const TinfoilProvider: Plugin = async ({ client }) => {
         provider.installGuard()
         return {
           ...(stored?.key ? { apiKey: stored.key } : {}),
+          baseURL: SENTINEL_BASE_URL,
           fetch: provider.guardedFetch,
         }
       },
