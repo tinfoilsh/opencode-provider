@@ -187,8 +187,16 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
     return attempt
   }
 
-  /** Read at render time so a verification the SDK renewed by itself shows up. */
-  const verification = (): Verification | undefined => (state.kind === "verified" ? state.client.currentVerification() : undefined)
+  // Read at render time so a verification the SDK renewed by itself shows up.
+  // The SDK drops its report once the verification expires, until the next
+  // request verifies again; show the last one meanwhile.
+  const lastReports = new WeakMap<RouterHTTPClient, Verification>()
+  const verification = (): Verification | undefined => {
+    if (state.kind !== "verified") return undefined
+    const report = state.client.currentVerification()
+    if (report) lastReports.set(state.client, report)
+    return report ?? lastReports.get(state.client)
+  }
 
   // =============================================================================
   // Transport
