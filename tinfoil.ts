@@ -139,8 +139,8 @@ const sentence = (reason: string) => {
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`
 }
 
-/** What a successful verification proves; the SDK re-exports it only as `current`. */
-type Verification = NonNullable<RouterHTTPClient["current"]>
+/** The report of the verification the client relies on; the SDK exposes it only through `currentVerification()`. */
+type Verification = NonNullable<ReturnType<RouterHTTPClient["currentVerification"]>>
 
 // =============================================================================
 // Verification state
@@ -176,7 +176,7 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
         const { RouterHTTPClient } = await import("tinfoil")
         const client = await RouterHTTPClient.create()
         state = { kind: "verified", client }
-        debug(`verified ${client.current?.codeDigest}`)
+        debug(`verified ${client.currentVerification()?.verifiedFacts?.codeDigest}`)
       } catch (error) {
         state = { kind: "failed", reason: errorMessage(error) }
         debug(`verification failed: ${state.reason}`)
@@ -188,7 +188,7 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
   }
 
   /** Read at render time so a verification the SDK renewed by itself shows up. */
-  const verification = (): Verification | undefined => (state.kind === "verified" ? state.client.current : undefined)
+  const verification = (): Verification | undefined => (state.kind === "verified" ? state.client.currentVerification() : undefined)
 
   // =============================================================================
   // Transport
@@ -538,7 +538,7 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
       const reason = verdict.kind === "failed" ? verdict.reason : "verification did not complete"
       return `Tinfoil unverified [!] — ${sentence(reason)} Requests are blocked. See ${HELP_URL}`
     }
-    const facts = verification()
+    const facts = verification()?.verifiedFacts
     return `Tinfoil verified [✓] ${facts?.codeTag || "unknown"} ${shortHash(facts?.codeDigest)}`
   }
 
@@ -546,8 +546,9 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
 
   /** The full document, as `/tinfoil` renders it. */
   const report = (verdict: VerifyState): string => {
-    const facts = verification()
-    if (verdict.kind !== "verified" || !facts) {
+    const current = verification()
+    const facts = current?.verifiedFacts
+    if (verdict.kind !== "verified" || !current || !facts) {
       return [
         summary(verdict),
         "",
@@ -580,8 +581,8 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
       `  HPKE public key: ${facts.hpkePublicKey ?? "unknown"}`,
       "",
       "Verifier",
-      `  Verifier:        ${facts.metadata.verifier.name} ${facts.metadata.verifier.version}`,
-      `  Verified at:     ${timeOf(facts.metadata.verifiedAt)}`,
+      `  Verifier:        ${current.metadata.verifier.name} ${current.metadata.verifier.version}`,
+      `  Verified at:     ${timeOf(current.metadata.verifiedAt)}`,
       `  Fresh until:     ${facts.freshnessExpiresAt ? timeOf(facts.freshnessExpiresAt) : "no expiry"}`,
     ].join("\n")
   }
@@ -594,7 +595,7 @@ const createProvider = async (notify?: (message: string) => Promise<unknown>) =>
   const publishStatus = async () => {
     const verdict = state
     if (verdict.kind === "pending") return
-    const facts = verification()
+    const facts = verification()?.verifiedFacts
     try {
       // Field names predate SDK 2.0's `codeTag` and `codeDigest`; kept so a
       // sidebar from an older plugin version still reads them.
